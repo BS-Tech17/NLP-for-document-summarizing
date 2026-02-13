@@ -1,131 +1,203 @@
+"""
+PDF Text Summarizer
+
+Extracts text from a PDF, ranks sentences using TextRank,
+and produces a focus-aware summary.
+"""
+
+import argparse
+import logging
+import re
+from pathlib import Path
+from typing import List
+
 import nltk
 import numpy as np
-from nltk.corpus import stopwords, words
-from nltk.cluster.util import cosine_distance
 import networkx as nx
 import pdfplumber
-import re
+from nltk.corpus import stopwords, words
+from nltk.cluster.util import cosine_distance
 
-nltk.download('stopwords')
-nltk.download('punkt')
-nltk.download('words')
 
-def pdf_r(file_path):
-    with pdfplumber.open(file_path) as pdf_file:
-        text = ""
-        for page in pdf_file.pages:
-            text += page.extract_text()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+nltk.download("punkt", quiet=True)
+nltk.download("punkt_tab", quiet=True)
+nltk.download("stopwords", quiet=True)
+nltk.download("words", quiet=True)
+
+STOP_WORDS = set(stopwords.words("english"))
+ENGLISH_WORDS = set(words.words())
+
+
+# PDF text extraction
+def extract_pdf_text(file_path: Path) -> str:
+    logging.info(f"Reading PDF: {file_path}")
+    text = ""
+
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + " "
+
     return text
 
-def clean_text(text):
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'[^a-zA-Z0-9,.\s]', '', text)
-    return text
 
-def read_article(file_name):
-    article = pdf_r(file_name)
-    cleaned_art = clean_text(article)
-    sentences = nltk.sent_tokenize(cleaned_art)
-    return sentences
+# Text normalization
+def clean_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^a-zA-Z0-9,. ]", "", text)
+    return text.strip()
 
-def sent_similarity(sent1, sent2, stopwords=None):
-    if stopwords is None:
-        stopwords = []
-    sent1 = [w.lower() for w in nltk.word_tokenize(sent1) if w.lower() not in stopwords]
-    sent2 = [w.lower() for w in nltk.word_tokenize(sent2) if w.lower() not in stopwords]
-    total_words = list(set(sent1 + sent2))
 
-    vec1 = [0] * len(total_words)
-    vec2 = [0] * len(total_words)
+def tokenize_sentences(text: str) -> List[str]:
+    return nltk.sent_tokenize(text)
 
-    for w in sent1:
-        vec1[total_words.index(w)] += 1
 
-    for w in sent2:
-        vec2[total_words.index(w)] += 1
+# Sentence similarity via cosine distance
+def sentence_similarity(sent1: str, sent2: str) -> float:
+    tokens1 = [
+        w.lower()
+        for w in nltk.word_tokenize(sent1)
+        if w.lower() not in STOP_WORDS
+    ]
+    tokens2 = [
+        w.lower()
+        for w in nltk.word_tokenize(sent2)
+        if w.lower() not in STOP_WORDS
+    ]
+
+    vocab = list(set(tokens1 + tokens2))
+    vec1 = np.zeros(len(vocab))
+    vec2 = np.zeros(len(vocab))
+
+    for w in tokens1:
+        vec1[vocab.index(w)] += 1
+    for w in tokens2:
+        vec2[vocab.index(w)] += 1
 
     return 1 - cosine_distance(vec1, vec2)
 
-def sim_matrix(sentences, stop_words):
-    sim_mat = np.zeros((len(sentences), len(sentences)))
-    for i1 in range(len(sentences)):
-        for i2 in range(len(sentences)):
-            if i1 == i2:
-                continue
-            sim_mat[i1][i2] = sent_similarity(sentences[i1], sentences[i2], stop_words)
-    return sim_mat
 
-def enhance_sentence(sentence):
-    enhancements = [
-        "This report gives the details about",
-        "Let's start with the details about",
-        "The well is",
-        "We are discussing about",
-        "This indicates that",
-        "It is noteworthy that",
-        "Interestingly,",
-        "Furthermore,",
-        "In addition to this,",
-        "As a result,",
-        "Consequently,"
+# Similarity matrix construction
+def build_similarity_matrix(sentences: List[str]) -> np.ndarray:
+    size = len(sentences)
+    matrix = np.zeros((size, size))
+
+    for i in range(size):
+        for j in range(size):
+            if i != j:
+                matrix[i][j] = sentence_similarity(sentences[i], sentences[j])
+
+    return matrix
+
+
+# Filter low-quality or unwanted sentences
+def meaningful(sentence: str) -> bool:
+    tokens = nltk.word_tokenize(sentence)
+    if not tokens:
+        return False
+
+    english_count = sum(1 for w in tokens if w.lower() in ENGLISH_WORDS)
+    return english_count / len(tokens) > 0.5
+
+
+def filter_sentences(sentences: List[str], exclude_words: List[str]) -> List[str]:
+    return [
+        s for s in sentences
+        if meaningful(s)
+        and not any(word.lower() in s.lower() for word in exclude_words)
     ]
 
-    if re.search(r'\b(area|wells|structure|production|base)\b', sentence, re.IGNORECASE):
-        enhanced_sentence = np.random.choice(enhancements) + " " + sentence
-    else:
-        enhanced_sentence = sentence
 
-    return enhanced_sentence
+ENHANCEMENTS = [
+    "This report highlights that",
+    "It is observed that",
+    "Importantly,",
+    "Furthermore,",
+    "In addition,",
+    "Consequently,",
+    "This indicates that"
+]
 
-def summary_final(file_name, t=5, exclude_words=None, focus_terms=None):
-    if exclude_words is None:
-        exclude_words = []
-    if focus_terms is None:
-        focus_terms = []
 
-    stop_words = set(stopwords.words('english'))
-    english_words = set(words.words())
-    sentences = read_article(file_name)
+# Optional summary phrasing enhancement
+def enhance(sentence: str) -> str:
+    if re.search(r"\b(area|wells|structure|production|base)\b", sentence, re.I):
+        return f"{np.random.choice(ENHANCEMENTS)} {sentence}"
+    return sentence
 
-    filtered_sentences = [
-        sentence for sentence in sentences
-        if not any(word.lower() in sentence.lower() for word in exclude_words)
-    ]
 
-    def is_meaningful(sentence):
-        words_in_sentence = nltk.word_tokenize(sentence)
-        english_word_count = sum(1 for word in words_in_sentence if word.lower() in english_words)
-        return english_word_count / len(words_in_sentence) > 0.5
+# TextRank-based summarization
+def summarize(
+    file_path: Path,
+    top_n: int,
+    exclude_words: List[str],
+    focus_terms: List[str],
+    output_file: Path
+):
 
-    meaningful_sentences = [sentence for sentence in filtered_sentences if is_meaningful(sentence)]
-    sentence_similarity_matrix = sim_matrix(meaningful_sentences, stop_words)
-    sentence_similarity_graph = nx.from_numpy_array(sentence_similarity_matrix)
-    scores = nx.pagerank(sentence_similarity_graph)
-    ranked_sentences = sorted(((scores[i], s) for i, s in enumerate(meaningful_sentences)), reverse=True)
-    selected_sentences = []
-    count = 0
-    for score, sentence in ranked_sentences:
-        if count >= t:
+    text = extract_pdf_text(file_path)
+    text = clean_text(text)
+    sentences = tokenize_sentences(text)
+
+    sentences = filter_sentences(sentences, exclude_words)
+
+    matrix = build_similarity_matrix(sentences)
+    graph = nx.from_numpy_array(matrix)
+    scores = nx.pagerank(graph)
+
+    ranked = sorted(
+        ((scores[i], s) for i, s in enumerate(sentences)),
+        reverse=True
+    )
+
+    selected = []
+
+    for _, s in ranked:
+        if len(selected) >= top_n:
             break
-        if any(term.lower() in sentence.lower() for term in focus_terms):
-            selected_sentences.append(sentence)
-            count += 1
-    if count < t:
-        for score, sentence in ranked_sentences:
-            if count >= t:
-                break
-            if sentence not in selected_sentences:
-                selected_sentences.append(sentence)
-                count += 1
-    summary = " ".join(selected_sentences)
-    enhanced_summary = " ".join([enhance_sentence(sentence) for sentence in selected_sentences])
+        if any(term.lower() in s.lower() for term in focus_terms):
+            selected.append(s)
 
-    with open("output.txt", "w") as u:
-        u.write("Summary:\n")
-        u.write(enhanced_summary + "\n")
-    print(enhanced_summary)
+    for _, s in ranked:
+        if len(selected) >= top_n:
+            break
+        if s not in selected:
+            selected.append(s)
 
-file_path = "well_student.pdf"
-exclude_words = ['Page', 'Figure']
-focus_terms = ['area', 'wells', 'structure', 'production', 'base']
-summary_final(file_path, t=17, exclude_words=exclude_words, focus_terms=focus_terms)
+    enhanced = " ".join(enhance(s) for s in selected)
+
+    output_file.write_text(enhanced)
+    logging.info(f"Summary saved to {output_file}")
+
+    print("\nSummary:\n")
+    print(enhanced)
+
+
+# Entry point
+if __name__ == "__main__":
+
+    pdf_file_path = "/Project Report b1.pdf"
+    num_sentences = 10
+    output_filename = "summary.txt"
+
+    class Args:
+        def __init__(self, pdf, sentences, output):
+            self.pdf = pdf
+            self.sentences = sentences
+            self.output = output
+
+    args = Args(pdf_file_path, num_sentences, output_filename)
+
+    summarize(
+        Path(args.pdf),
+        args.sentences,
+        exclude_words=["Page", "Figure"],
+        focus_terms=["area", "wells", "structure", "production", "base"],
+        output_file=Path(args.output)
+    )
