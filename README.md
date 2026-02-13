@@ -113,11 +113,4 @@ AI • Embedded Systems • Applied Research
 
 ---
 
-<h2>📜 License</h2>
 
-This project is intended for academic and research demonstration purposes.
-
-<hr/>
-<p align="center">
-⭐ Consider starring the repository if you found it useful
-</p>
